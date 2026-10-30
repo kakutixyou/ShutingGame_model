@@ -1,0 +1,34 @@
+{
+  "items": [
+    {
+      "id": "attack_plus_3",
+      "name": "攻撃力UP",
+      "category": "buff",
+      "applies_to": "player.attack",
+      "effect_type": "persistent",
+      "stat_modifier": {
+        "attack": 3
+      },
+      "duration_sec": null,
+      "description": "永続: 攻撃力 +3",
+      "rarity": "common",
+      "is_stackable": true,
+      "stack_limit": 5
+    },
+    {
+      "id": "damage_nullify_10s",
+      "name": "耐久シールド",
+      "category": "shield",
+      "applies_to": "player",
+      "effect_type": "temporary",
+      "stat_modifier": {
+        "damage_taken": 0
+      },
+      "duration_sec": 10,
+      "description": "10秒後に効果が消滅: 全てのダメージが無効化",
+      "rarity": "rare",
+      "is_stackable": false,
+      "stack_limit": 1
+    }
+  ]
+}

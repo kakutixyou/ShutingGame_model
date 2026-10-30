@@ -1,0 +1,28 @@
+{
+  "boss_profile": {
+    "name": "Trial Boss",
+    "max_hp": 200,
+    "hp": 200,
+    "phase_count": 1,
+    "damage_per_hit": 12,
+    "attack_pattern": [
+      "straight_shot",
+      "fan_shot",
+      "burst_shot"
+    ],
+    "ai_behavior": {
+      "enabled": true,
+      "phase_change_at_hp": [
+        150,
+        80
+      ],
+      "difficulty_scaling": "linear"
+    },
+    "adjustable_fields": [
+      "max_hp",
+      "damage_per_hit",
+      "phase_count",
+      "attack_pattern"
+    ]
+  }
+}

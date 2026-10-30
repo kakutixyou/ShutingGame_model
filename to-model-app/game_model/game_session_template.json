@@ -1,0 +1,66 @@
+{
+  "meta": {
+    "name": "shooter_boss_trial",
+    "version": "0.1.0",
+    "description": "シューティングゲーム向けの基本モデル。3秒ごとにアイテムが落ち、ボス戦と残機管理を含む。",
+    "target_engines": [
+      "Unity",
+      "Unreal Engine",
+      "GameMaker"
+    ],
+    "author": "kakutixyou",
+    "notes": [
+      "数値はモデル上で調整可能",
+      "アイテムは永続効果または一時効果を持つ",
+      "ボスHP、残機、ダメージ値を変更して難易度を微調整できる"
+    ]
+  },
+  "drop_rules": {
+    "interval_sec": 3,
+    "drop_on": [
+      "field_tick",
+      "enemy_defeat"
+    ],
+    "randomization": {
+      "enabled": true,
+      "drop_pool": [
+        "attack_plus_3",
+        "damage_nullify_10s"
+      ],
+      "weights": {
+        "attack_plus_3": 0.7,
+        "damage_nullify_10s": 0.3
+      }
+    }
+  },
+  "player": {
+    "base_hp": 100,
+    "max_hp": 100,
+    "base_attack": 10,
+    "lives": 2,
+    "invulnerable_after_hit_sec": 1.0,
+    "status_effects": []
+  },
+  "boss": {
+    "name": "Trial Boss",
+    "max_hp": 200,
+    "hp": 200,
+    "damage_per_hit": 12,
+    "phase_count": 1,
+    "pattern": "standard_arcade"
+  },
+  "items": [
+    "attack_plus_3",
+    "damage_nullify_10s"
+  ],
+  "difficulty": {
+    "preset": "normal",
+    "adjustable": true,
+    "parameters": {
+      "boss_hp_multiplier": 1.0,
+      "player_damage_multiplier": 1.0,
+      "drop_interval_sec": 3,
+      "player_lives": 2
+    }
+  }
+}

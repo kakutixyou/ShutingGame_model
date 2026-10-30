@@ -1,0 +1,32 @@
+{
+  "player_profile": {
+    "base_hp": 100,
+    "base_attack": 10,
+    "lives": 2,
+    "movement_speed": 5,
+    "fire_rate": 0.2,
+    "max_hp": 100,
+    "adjustable_fields": [
+      "base_hp",
+      "base_attack",
+      "lives",
+      "movement_speed",
+      "fire_rate",
+      "invulnerable_after_hit_sec"
+    ]
+  },
+  "effect_model": {
+    "persistent_effects": [
+      "attack_plus_3"
+    ],
+    "temporary_effects": [
+      "damage_nullify_10s"
+    ],
+    "resolve_order": [
+      "apply_stat_modifiers",
+      "apply_temporary_effects",
+      "apply_damage",
+      "expire_effects"
+    ]
+  }
+}
