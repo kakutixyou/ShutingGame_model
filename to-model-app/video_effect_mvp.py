@@ -16,7 +16,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -25,6 +25,8 @@ try:
     import mediapipe as mp
 except Exception:  # pragma: no cover - optional dependency
     mp = None
+
+from effect_templates import EFFECT_LIBRARY, parse_trigger_event, resolve_effect_template
 
 
 FaceBox = Tuple[int, int, int, int]
@@ -127,7 +129,6 @@ def analyze_expression(frame: np.ndarray, face_box: FaceBox) -> Dict[str, float]
     face_w = max(1.0, w)
     scores = {"surprise": 0.0, "laugh": 0.0, "confused": 0.0, "angry": 0.0}
 
-    # MediaPipe face mesh for a more interpretable approximation.
     if mp is not None:
         face_mesh = mp.solutions.face_mesh.FaceMesh(
             static_image_mode=False,
@@ -150,30 +151,25 @@ def analyze_expression(frame: np.ndarray, face_box: FaceBox) -> Dict[str, float]
             mouth_right = lm[308]
             brow_left = lm[27]
             brow_right = lm[276]
-            nose_tip = lm[4]
 
             eye_open = (euclidean((left_eye_top.x, left_eye_top.y), (left_eye_bottom.x, left_eye_bottom.y)) +
                         euclidean((right_eye_top.x, right_eye_top.y), (right_eye_bottom.x, right_eye_bottom.y)))
             mouth_open = euclidean((mouth_top.x, mouth_top.y), (mouth_bottom.x, mouth_bottom.y))
             mouth_width = euclidean((mouth_left.x, mouth_left.y), (mouth_right.x, mouth_right.y))
             brow_gap = euclidean((brow_left.x, brow_left.y), (brow_right.x, brow_right.y))
-            nose_y = nose_tip.y
 
             surprise = min(1.0, (eye_open / max(0.05, face_h / 22.0) + mouth_open / max(0.05, face_h / 18.0)) / 2.5)
             laugh = min(1.0, (mouth_open / max(0.05, face_h / 24.0) + mouth_width / max(0.05, face_w / 10.0)) / 2.0)
             confused = min(1.0, (abs(brow_gap - (face_w / 10.0)) / max(0.05, face_w / 8.0)) / 3.0)
             angry = min(1.0, max(0.0, (brow_gap / max(0.05, face_w / 8.0)) - 1.0) * 0.8)
 
-            scores = {
+            return {
                 "surprise": float(surprise),
                 "laugh": float(laugh),
                 "confused": float(confused),
                 "angry": float(angry),
             }
-            return scores
 
-    # Fallback heuristics if MediaPipe is unavailable.
-    # These are intentionally simple and explainable.
     scores["surprise"] = min(1.0, 0.22 + (w / max(1.0, frame.shape[1])) * 0.4)
     scores["laugh"] = min(1.0, 0.15 + (h / max(1.0, frame.shape[0])) * 0.45)
     scores["confused"] = min(1.0, 0.18 + abs(w - h) / max(1.0, frame.shape[1]) * 0.8)
@@ -201,11 +197,17 @@ def apply_face_blur(frame: np.ndarray, boxes: Sequence[FaceBox], kernel_size: in
 
 
 def apply_expression_effect(frame: np.ndarray, face_box: FaceBox, trigger: str, strength: float = 1.0) -> np.ndarray:
-    """Apply a prank-style expression exaggeration for a given trigger."""
+    """Apply a prank-style expression exaggeration using a dictionary-based template."""
     out = frame.copy()
     x, y, w, h = face_box
     if w <= 0 or h <= 0:
         return out
+
+    template = resolve_effect_template(trigger, strength)
+    eye_scale = template.get("eye_scale", 1.0)
+    mouth_scale = template.get("mouth_scale", 1.0)
+    contrast = template.get("contrast_boost", 1.0)
+    brightness = template.get("brightness_boost", 0.0)
 
     if trigger == "surprise":
         eye_h = max(8, int(h * 0.18))
@@ -217,12 +219,14 @@ def apply_expression_effect(frame: np.ndarray, face_box: FaceBox, trigger: str, 
             eye_roi = out[ey : ey + eye_h, ex : ex + eye_w]
             if eye_roi.size == 0:
                 continue
-            enlarged = cv2.resize(eye_roi, (max(2, int(eye_w * (1.6 + strength * 0.5))), max(2, int(eye_h * (1.6 + strength * 0.5)))), interpolation=cv2.INTER_LINEAR)
+            sx = max(2, int(eye_w * eye_scale))
+            sy = max(2, int(eye_h * eye_scale))
+            enlarged = cv2.resize(eye_roi, (sx, sy), interpolation=cv2.INTER_LINEAR)
             out[ey : ey + enlarged.shape[0], ex : ex + enlarged.shape[1]] = enlarged
 
         mouth_y = y + int(h * 0.7)
-        mouth_h = max(10, int(h * 0.18 * (0.8 + strength * 0.7)))
-        mouth_w = max(20, int(w * 0.45 * (0.9 + strength * 0.6)))
+        mouth_h = max(10, int(h * 0.18 * mouth_scale))
+        mouth_w = max(20, int(w * 0.45 * mouth_scale))
         mouth_x = x + int(w * 0.3)
         mouth_roi = out[mouth_y : mouth_y + mouth_h, mouth_x : mouth_x + mouth_w]
         if mouth_roi.size > 0:
@@ -231,8 +235,8 @@ def apply_expression_effect(frame: np.ndarray, face_box: FaceBox, trigger: str, 
 
     elif trigger == "laugh":
         mouth_y = y + int(h * 0.62)
-        mouth_h = max(12, int(h * 0.2 * (0.8 + strength * 1.2)))
-        mouth_w = max(26, int(w * 0.6 * (0.9 + strength * 0.8)))
+        mouth_h = max(12, int(h * 0.2 * mouth_scale))
+        mouth_w = max(26, int(w * 0.6 * mouth_scale))
         mouth_x = x + int(w * 0.2)
         mouth_roi = out[mouth_y : mouth_y + mouth_h, mouth_x : mouth_x + mouth_w]
         if mouth_roi.size > 0:
@@ -252,8 +256,7 @@ def apply_expression_effect(frame: np.ndarray, face_box: FaceBox, trigger: str, 
     elif trigger == "angry":
         out = cv2.convertScaleAbs(out, alpha=1.2, beta=18)
 
-    # Final effect: higher contrast for emphasis.
-    out = cv2.convertScaleAbs(out, alpha=1.08 + strength * 0.12, beta=8)
+    out = cv2.convertScaleAbs(out, alpha=contrast, beta=brightness)
     return out
 
 
@@ -269,6 +272,7 @@ def apply_qr_mask(frame: np.ndarray, boxes: Sequence[np.ndarray]) -> np.ndarray:
 
 def select_trigger(expression_scores: Dict[str, float], trigger_mode: str) -> str:
     """Return the strongest matching trigger, or 'none'."""
+    trigger_mode = (trigger_mode or "none").lower()
     if trigger_mode == "none":
         return "none"
     if trigger_mode == "auto":
@@ -282,8 +286,6 @@ def select_trigger(expression_scores: Dict[str, float], trigger_mode: str) -> st
         return "confused" if expression_scores.get("confused", 0.0) >= 0.5 else "none"
     if trigger_mode == "angry":
         return "angry" if expression_scores.get("angry", 0.0) >= 0.55 else "none"
-
-    # default: strongest non-zero signal
     strongest = max(expression_scores, key=lambda k: expression_scores[k])
     return strongest if expression_scores[strongest] >= 0.55 else "none"
 
@@ -296,6 +298,8 @@ def process_video(
     qr_mask: bool = True,
     trigger_mode: str = "surprise",
     trigger_threshold: float = 0.62,
+    trigger_event: Optional[Dict[str, Any]] = None,
+    effect_duration_frames: int = 6,
 ) -> None:
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
@@ -314,6 +318,16 @@ def process_video(
         raise RuntimeError(f"Could not open output video writer for {output_path}")
 
     frame_index = 0
+    active_trigger = None
+    effect_remaining = 0
+    effect_strength = 1.0
+
+    if trigger_event is not None:
+        event = parse_trigger_event(trigger_event)
+        active_trigger = event.get("trigger")
+        effect_strength = float(event.get("strength", 1.0))
+        effect_remaining = int(event.get("duration_frames", effect_duration_frames))
+
     while True:
         ok, frame = cap.read()
         if not ok:
@@ -329,15 +343,18 @@ def process_video(
             if qr_boxes:
                 frame = apply_qr_mask(frame, qr_boxes)
 
-        # Only evaluate reactions when trigger mode is enabled.
-        if trigger_mode and trigger_mode.lower() != "none":
+        if effect_remaining > 0 and active_trigger and active_trigger != "none":
             for face_box in face_boxes:
-                expression_scores = analyze_expression(frame, face_box)
-                trigger = select_trigger(expression_scores, trigger_mode)
-                if trigger != "none":
-                    if expression_scores.get(trigger, 0.0) >= trigger_threshold:
-                        frame = apply_expression_effect(frame, face_box, trigger=trigger, strength=1.0)
-                        break
+                frame = apply_expression_effect(frame, face_box, trigger=active_trigger, strength=effect_strength)
+                break
+            effect_remaining -= 1
+        elif trigger_mode and trigger_mode.lower() != "none":
+            for face_box in face_boxes:
+                scores = analyze_expression(frame, face_box)
+                trigger = select_trigger(scores, trigger_mode)
+                if trigger != "none" and scores.get(trigger, 0.0) >= trigger_threshold:
+                    frame = apply_expression_effect(frame, face_box, trigger=trigger, strength=1.0)
+                    break
 
         writer.write(frame)
 
@@ -370,6 +387,18 @@ def parse_args() -> argparse.Namespace:
         default=0.62,
         help="Strength threshold required before applying a prank expression effect.",
     )
+    parser.add_argument(
+        "--trigger-json",
+        type=str,
+        default=None,
+        help="Optional trigger JSON such as {\"trigger\":\"surprise\",\"strength\":0.8,\"duration_frames\":6}",
+    )
+    parser.add_argument(
+        "--effect-duration-frames",
+        type=int,
+        default=6,
+        help="How many frames to keep an event-triggered effect active.",
+    )
     return parser.parse_args()
 
 
@@ -380,6 +409,14 @@ def main() -> int:
         print(f"Input file not found: {input_path}", file=sys.stderr)
         return 1
 
+    trigger_event = None
+    if args.trigger_json:
+        try:
+            trigger_event = json.loads(args.trigger_json)
+        except json.JSONDecodeError as exc:
+            print(f"Invalid trigger JSON: {exc}", file=sys.stderr)
+            return 1
+
     try:
         process_video(
             str(input_path),
@@ -389,6 +426,8 @@ def main() -> int:
             qr_mask=not args.disable_qr_mask,
             trigger_mode=args.trigger_mode,
             trigger_threshold=args.trigger_threshold,
+            trigger_event=trigger_event,
+            effect_duration_frames=args.effect_duration_frames,
         )
     except Exception as exc:  # pragma: no cover
         print(f"Error: {exc}", file=sys.stderr)
