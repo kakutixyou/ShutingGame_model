@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Video effect MVP for face anonymization and QR masking.
+"""Video effect MVP with trigger-based expression exaggeration.
 
-This script creates a single-pass video processing pipeline that:
-- detects faces in each frame
-- blurs or mosaics them
-- detects QR codes and masks them
-- optionally evaluates a surprise-like expression trigger and applies a prank effect
-
-This is intentionally lightweight and easy to extend for richer expressions,
-face swaps, and timeline-based trick edits.
+Design goal:
+- Always protect privacy: face blur + QR masking remain active.
+- Only when a trigger event occurs, run a lightweight expression analysis.
+- If a face reaction is large enough, apply a prank-style exaggeration effect.
+- This keeps the system practical and extensible without requiring a full custom
+  facial generation model from the start.
 """
 
 from __future__ import annotations
 
 import argparse
-import os
+import json
 import sys
 from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -119,17 +117,17 @@ def detect_qr_boxes(frame: np.ndarray) -> List[np.ndarray]:
     return []
 
 
-def detect_expression_score(frame: np.ndarray, face_box: FaceBox) -> float:
-    """Return a rough surprise-like expression score.
-
-    This is a heuristic; it is intentionally lightweight and interpretable.
-    It is designed as the first human-readable step before replacing with a
-    stronger trained model later.
-    """
+def analyze_expression(frame: np.ndarray, face_box: FaceBox) -> Dict[str, float]:
+    """Return rough expression scores: surprise, laugh, confused, angry."""
     x, y, w, h = face_box
     if w <= 0 or h <= 0:
-        return 0.0
+        return {"surprise": 0.0, "laugh": 0.0, "confused": 0.0, "angry": 0.0}
 
+    face_h = max(1.0, h)
+    face_w = max(1.0, w)
+    scores = {"surprise": 0.0, "laugh": 0.0, "confused": 0.0, "angry": 0.0}
+
+    # MediaPipe face mesh for a more interpretable approximation.
     if mp is not None:
         face_mesh = mp.solutions.face_mesh.FaceMesh(
             static_image_mode=False,
@@ -141,34 +139,46 @@ def detect_expression_score(frame: np.ndarray, face_box: FaceBox) -> float:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = face_mesh.process(rgb)
         if results.multi_face_landmarks:
-            landmark_list = results.multi_face_landmarks[0].landmark
-            # Common face mesh indices for eyes and mouth.
-            # These values are rough but effective as a rule-based trigger.
-            left_eye_top = landmark_list[159]
-            left_eye_bottom = landmark_list[145]
-            right_eye_top = landmark_list[386]
-            right_eye_bottom = landmark_list[374]
-            mouth_top = landmark_list[13]
-            mouth_bottom = landmark_list[14]
-            nose_tip = landmark_list[4]
+            lm = results.multi_face_landmarks[0].landmark
+            left_eye_top = lm[159]
+            left_eye_bottom = lm[145]
+            right_eye_top = lm[386]
+            right_eye_bottom = lm[374]
+            mouth_top = lm[13]
+            mouth_bottom = lm[14]
+            mouth_left = lm[78]
+            mouth_right = lm[308]
+            brow_left = lm[27]
+            brow_right = lm[276]
+            nose_tip = lm[4]
 
             eye_open = (euclidean((left_eye_top.x, left_eye_top.y), (left_eye_bottom.x, left_eye_bottom.y)) +
                         euclidean((right_eye_top.x, right_eye_top.y), (right_eye_bottom.x, right_eye_bottom.y)))
             mouth_open = euclidean((mouth_top.x, mouth_top.y), (mouth_bottom.x, mouth_bottom.y))
+            mouth_width = euclidean((mouth_left.x, mouth_left.y), (mouth_right.x, mouth_right.y))
+            brow_gap = euclidean((brow_left.x, brow_left.y), (brow_right.x, brow_right.y))
             nose_y = nose_tip.y
-            # Use a rough face-height estimate based on the whole box.
-            face_height_norm = max(0.001, h / frame.shape[0])
-            eye_component = max(0.0, eye_open / max(0.001, face_height_norm))
-            mouth_component = max(0.0, mouth_open / max(0.001, face_height_norm))
-            # Surprise-like signal: widened eyes + open mouth.
-            surprise = (eye_component * 0.55 + mouth_component * 0.45)
-            return min(1.0, max(0.0, surprise / 3.5))
 
-    # Fallback heuristic without MediaPipe: box-only approximation.
-    eye_ratio = 0.24
-    mouth_ratio = 0.12
-    surprise = eye_ratio * 0.55 + mouth_ratio * 0.45
-    return min(1.0, max(0.0, surprise))
+            surprise = min(1.0, (eye_open / max(0.05, face_h / 22.0) + mouth_open / max(0.05, face_h / 18.0)) / 2.5)
+            laugh = min(1.0, (mouth_open / max(0.05, face_h / 24.0) + mouth_width / max(0.05, face_w / 10.0)) / 2.0)
+            confused = min(1.0, (abs(brow_gap - (face_w / 10.0)) / max(0.05, face_w / 8.0)) / 3.0)
+            angry = min(1.0, max(0.0, (brow_gap / max(0.05, face_w / 8.0)) - 1.0) * 0.8)
+
+            scores = {
+                "surprise": float(surprise),
+                "laugh": float(laugh),
+                "confused": float(confused),
+                "angry": float(angry),
+            }
+            return scores
+
+    # Fallback heuristics if MediaPipe is unavailable.
+    # These are intentionally simple and explainable.
+    scores["surprise"] = min(1.0, 0.22 + (w / max(1.0, frame.shape[1])) * 0.4)
+    scores["laugh"] = min(1.0, 0.15 + (h / max(1.0, frame.shape[0])) * 0.45)
+    scores["confused"] = min(1.0, 0.18 + abs(w - h) / max(1.0, frame.shape[1]) * 0.8)
+    scores["angry"] = min(1.0, 0.12 + (abs(w - 0.4 * frame.shape[1]) / max(1.0, frame.shape[1])) * 0.7)
+    return scores
 
 
 def apply_face_blur(frame: np.ndarray, boxes: Sequence[FaceBox], kernel_size: int = 31) -> np.ndarray:
@@ -190,33 +200,60 @@ def apply_face_blur(frame: np.ndarray, boxes: Sequence[FaceBox], kernel_size: in
     return out
 
 
-def apply_expression_trigger(frame: np.ndarray, face_box: FaceBox) -> np.ndarray:
-    """Apply a prank-like exaggeration effect when the expression trigger fires.
-
-    This is intentionally a lightweight visual exaggeration, not a full face swap.
-    It widens the eye region and boosts contrast to make a surprise effect read clearly.
-    """
+def apply_expression_effect(frame: np.ndarray, face_box: FaceBox, trigger: str, strength: float = 1.0) -> np.ndarray:
+    """Apply a prank-style expression exaggeration for a given trigger."""
     out = frame.copy()
     x, y, w, h = face_box
     if w <= 0 or h <= 0:
         return out
 
-    # Create a subtle extra emphasis around the eyes.
-    eye_h = max(8, h // 6)
-    eye_w = max(12, w // 5)
-    eye_y = y + max(6, h // 4)
-    eye_x1 = x + max(5, w // 6)
-    eye_x2 = x + w - max(5, w // 6) - eye_w
+    if trigger == "surprise":
+        eye_h = max(8, int(h * 0.18))
+        eye_w = max(12, int(w * 0.18))
+        eye_y = y + max(6, int(h * 0.2))
+        eye_x1 = x + max(5, int(w * 0.16))
+        eye_x2 = x + w - max(5, int(w * 0.16)) - eye_w
+        for ex, ey in [(eye_x1, eye_y), (eye_x2, eye_y)]:
+            eye_roi = out[ey : ey + eye_h, ex : ex + eye_w]
+            if eye_roi.size == 0:
+                continue
+            enlarged = cv2.resize(eye_roi, (max(2, int(eye_w * (1.6 + strength * 0.5))), max(2, int(eye_h * (1.6 + strength * 0.5)))), interpolation=cv2.INTER_LINEAR)
+            out[ey : ey + enlarged.shape[0], ex : ex + enlarged.shape[1]] = enlarged
 
-    for ex, ey in [(eye_x1, eye_y), (eye_x2, eye_y)]:
-        eye_roi = out[ey : ey + eye_h, ex : ex + eye_w]
-        if eye_roi.size == 0:
-            continue
-        enlarged = cv2.resize(eye_roi, (eye_w * 2, eye_h * 2), interpolation=cv2.INTER_LINEAR)
-        out[ey : ey + eye_h * 2, ex : ex + eye_w * 2] = enlarged[: eye_h * 2, : eye_w * 2]
+        mouth_y = y + int(h * 0.7)
+        mouth_h = max(10, int(h * 0.18 * (0.8 + strength * 0.7)))
+        mouth_w = max(20, int(w * 0.45 * (0.9 + strength * 0.6)))
+        mouth_x = x + int(w * 0.3)
+        mouth_roi = out[mouth_y : mouth_y + mouth_h, mouth_x : mouth_x + mouth_w]
+        if mouth_roi.size > 0:
+            mouth_enlarged = cv2.resize(mouth_roi, (mouth_w * 2, mouth_h * 2), interpolation=cv2.INTER_LINEAR)
+            out[mouth_y : mouth_y + mouth_enlarged.shape[0], mouth_x : mouth_x + mouth_enlarged.shape[1]] = mouth_enlarged
 
-    # Slightly heighten contrast to emphasize the comedic reaction.
-    out = cv2.convertScaleAbs(out, alpha=1.15, beta=10)
+    elif trigger == "laugh":
+        mouth_y = y + int(h * 0.62)
+        mouth_h = max(12, int(h * 0.2 * (0.8 + strength * 1.2)))
+        mouth_w = max(26, int(w * 0.6 * (0.9 + strength * 0.8)))
+        mouth_x = x + int(w * 0.2)
+        mouth_roi = out[mouth_y : mouth_y + mouth_h, mouth_x : mouth_x + mouth_w]
+        if mouth_roi.size > 0:
+            mouth_enlarged = cv2.resize(mouth_roi, (mouth_w * 2, mouth_h * 2), interpolation=cv2.INTER_LINEAR)
+            out[mouth_y : mouth_y + mouth_enlarged.shape[0], mouth_x : mouth_x + mouth_enlarged.shape[1]] = mouth_enlarged
+
+    elif trigger == "confused":
+        brow_y = y + max(6, int(h * 0.2))
+        brow_h = max(8, int(h * 0.1))
+        brow_w = max(20, int(w * 0.55))
+        brow_x = x + int(w * 0.2)
+        brow_roi = out[brow_y : brow_y + brow_h, brow_x : brow_x + brow_w]
+        if brow_roi.size > 0:
+            brow_enlarged = cv2.resize(brow_roi, (brow_w * 2, brow_h * 2), interpolation=cv2.INTER_LINEAR)
+            out[brow_y : brow_y + brow_enlarged.shape[0], brow_x : brow_x + brow_enlarged.shape[1]] = brow_enlarged
+
+    elif trigger == "angry":
+        out = cv2.convertScaleAbs(out, alpha=1.2, beta=18)
+
+    # Final effect: higher contrast for emphasis.
+    out = cv2.convertScaleAbs(out, alpha=1.08 + strength * 0.12, beta=8)
     return out
 
 
@@ -230,14 +267,35 @@ def apply_qr_mask(frame: np.ndarray, boxes: Sequence[np.ndarray]) -> np.ndarray:
     return out
 
 
+def select_trigger(expression_scores: Dict[str, float], trigger_mode: str) -> str:
+    """Return the strongest matching trigger, or 'none'."""
+    if trigger_mode == "none":
+        return "none"
+    if trigger_mode == "auto":
+        strongest = max(expression_scores, key=lambda k: expression_scores[k])
+        return strongest if expression_scores[strongest] >= 0.55 else "none"
+    if trigger_mode == "surprise":
+        return "surprise" if expression_scores.get("surprise", 0.0) >= 0.62 else "none"
+    if trigger_mode == "laugh":
+        return "laugh" if expression_scores.get("laugh", 0.0) >= 0.6 else "none"
+    if trigger_mode == "confused":
+        return "confused" if expression_scores.get("confused", 0.0) >= 0.5 else "none"
+    if trigger_mode == "angry":
+        return "angry" if expression_scores.get("angry", 0.0) >= 0.55 else "none"
+
+    # default: strongest non-zero signal
+    strongest = max(expression_scores, key=lambda k: expression_scores[k])
+    return strongest if expression_scores[strongest] >= 0.55 else "none"
+
+
 def process_video(
     input_path: str,
     output_path: str,
     face_blur_kernel: int = 31,
     face_expand_ratio: float = 0.18,
     qr_mask: bool = True,
-    expression_trigger: str = "none",
-    surprise_threshold: float = 0.62,
+    trigger_mode: str = "surprise",
+    trigger_threshold: float = 0.62,
 ) -> None:
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
@@ -271,12 +329,15 @@ def process_video(
             if qr_boxes:
                 frame = apply_qr_mask(frame, qr_boxes)
 
-        if expression_trigger and expression_trigger.lower() != "none":
+        # Only evaluate reactions when trigger mode is enabled.
+        if trigger_mode and trigger_mode.lower() != "none":
             for face_box in face_boxes:
-                score = detect_expression_score(frame, face_box)
-                if expression_trigger.lower() == "surprise" and score >= surprise_threshold:
-                    frame = apply_expression_trigger(frame, face_box)
-                    break
+                expression_scores = analyze_expression(frame, face_box)
+                trigger = select_trigger(expression_scores, trigger_mode)
+                if trigger != "none":
+                    if expression_scores.get(trigger, 0.0) >= trigger_threshold:
+                        frame = apply_expression_effect(frame, face_box, trigger=trigger, strength=1.0)
+                        break
 
         writer.write(frame)
 
@@ -290,24 +351,24 @@ def process_video(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Face blur + QR masking video editor MVP")
+    parser = argparse.ArgumentParser(description="Trigger-based face anonymization and prank expression effect MVP")
     parser.add_argument("--input", type=str, required=True, help="Path to input video")
     parser.add_argument("--output", type=str, required=True, help="Path to processed output video")
     parser.add_argument("--face-blur-kernel", type=int, default=31, help="Gaussian blur strength for faces")
     parser.add_argument("--face-expand-ratio", type=float, default=0.18, help="Expand face boxes before blur")
     parser.add_argument("--disable-qr-mask", action="store_true", help="Disable QR code masking")
     parser.add_argument(
-        "--expression-trigger",
+        "--trigger-mode",
         type=str,
-        default="none",
-        choices=["none", "surprise"],
-        help="Trigger a prank-like expression exaggeration effect when a surprise-like expression is detected",
+        default="surprise",
+        choices=["none", "surprise", "laugh", "confused", "angry", "auto"],
+        help="Expression trigger to enable. 'auto' uses the strongest detected non-zero expression.",
     )
     parser.add_argument(
-        "--surprise-threshold",
+        "--trigger-threshold",
         type=float,
         default=0.62,
-        help="Threshold for surprise expression detection. Raise it for stricter triggers.",
+        help="Strength threshold required before applying a prank expression effect.",
     )
     return parser.parse_args()
 
@@ -326,8 +387,8 @@ def main() -> int:
             face_blur_kernel=args.face_blur_kernel,
             face_expand_ratio=args.face_expand_ratio,
             qr_mask=not args.disable_qr_mask,
-            expression_trigger=args.expression_trigger,
-            surprise_threshold=args.surprise_threshold,
+            trigger_mode=args.trigger_mode,
+            trigger_threshold=args.trigger_threshold,
         )
     except Exception as exc:  # pragma: no cover
         print(f"Error: {exc}", file=sys.stderr)
