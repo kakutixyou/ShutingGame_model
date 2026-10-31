@@ -1,0 +1,43 @@
+{
+  "type": "object",
+  "title": "VideoEffectTriggerEvent",
+  "description": "Event-driven expression edit request from the editor UI or app backend.",
+  "properties": {
+    "trigger": {
+      "type": "string",
+      "enum": ["none", "surprise", "laugh", "confused", "angry"],
+      "description": "Which expression trigger should be applied."
+    },
+    "strength": {
+      "type": "number",
+      "minimum": 0.1,
+      "maximum": 2.0,
+      "default": 1.0,
+      "description": "Effect strength multiplier."
+    },
+    "duration_frames": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 120,
+      "default": 6,
+      "description": "How many frames the effect should persist."
+    },
+    "timestamp": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Video timestamp in seconds when the trigger occurs."
+    },
+    "target": {
+      "type": "string",
+      "enum": ["face", "screen", "region", "qr"],
+      "default": "face",
+      "description": "Which region is affected."
+    },
+    "scene_id": {
+      "type": "string",
+      "description": "Optional scene identifier for timeline editing."
+    }
+  },
+  "required": ["trigger"],
+  "additionalProperties": false
+}
