@@ -6,9 +6,9 @@ This script creates a single-pass video processing pipeline that:
 - detects faces in each frame
 - blurs or mosaics them
 - detects QR codes and masks them
-- writes a processed output video
+- optionally evaluates a surprise-like expression trigger and applies a prank effect
 
-It is intentionally lightweight and easy to extend for richer expressions,
+This is intentionally lightweight and easy to extend for richer expressions,
 face swaps, and timeline-based trick edits.
 """
 
@@ -30,6 +30,10 @@ except Exception:  # pragma: no cover - optional dependency
 
 
 FaceBox = Tuple[int, int, int, int]
+
+
+def euclidean(p1, p2):
+    return float(np.linalg.norm(np.array(p1) - np.array(p2)))
 
 
 def detect_face_boxes(frame: np.ndarray, expand_ratio: float = 0.18) -> List[FaceBox]:
@@ -93,7 +97,6 @@ def detect_qr_boxes(frame: np.ndarray) -> List[np.ndarray]:
     try:
         data, bbox, _ = detector.detectAndDecode(gray)
         if data and bbox is not None:
-            # bbox is [(x1,y1), (x2,y2), (x3,y3), (x4,y4)] or similar
             points = np.asarray(bbox, dtype=np.int32)
             if points.size > 0:
                 return [points.reshape(-1, 2)]
@@ -116,6 +119,58 @@ def detect_qr_boxes(frame: np.ndarray) -> List[np.ndarray]:
     return []
 
 
+def detect_expression_score(frame: np.ndarray, face_box: FaceBox) -> float:
+    """Return a rough surprise-like expression score.
+
+    This is a heuristic; it is intentionally lightweight and interpretable.
+    It is designed as the first human-readable step before replacing with a
+    stronger trained model later.
+    """
+    x, y, w, h = face_box
+    if w <= 0 or h <= 0:
+        return 0.0
+
+    if mp is not None:
+        face_mesh = mp.solutions.face_mesh.FaceMesh(
+            static_image_mode=False,
+            max_num_faces=1,
+            refine_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(rgb)
+        if results.multi_face_landmarks:
+            landmark_list = results.multi_face_landmarks[0].landmark
+            # Common face mesh indices for eyes and mouth.
+            # These values are rough but effective as a rule-based trigger.
+            left_eye_top = landmark_list[159]
+            left_eye_bottom = landmark_list[145]
+            right_eye_top = landmark_list[386]
+            right_eye_bottom = landmark_list[374]
+            mouth_top = landmark_list[13]
+            mouth_bottom = landmark_list[14]
+            nose_tip = landmark_list[4]
+
+            eye_open = (euclidean((left_eye_top.x, left_eye_top.y), (left_eye_bottom.x, left_eye_bottom.y)) +
+                        euclidean((right_eye_top.x, right_eye_top.y), (right_eye_bottom.x, right_eye_bottom.y)))
+            mouth_open = euclidean((mouth_top.x, mouth_top.y), (mouth_bottom.x, mouth_bottom.y))
+            nose_y = nose_tip.y
+            # Use a rough face-height estimate based on the whole box.
+            face_height_norm = max(0.001, h / frame.shape[0])
+            eye_component = max(0.0, eye_open / max(0.001, face_height_norm))
+            mouth_component = max(0.0, mouth_open / max(0.001, face_height_norm))
+            # Surprise-like signal: widened eyes + open mouth.
+            surprise = (eye_component * 0.55 + mouth_component * 0.45)
+            return min(1.0, max(0.0, surprise / 3.5))
+
+    # Fallback heuristic without MediaPipe: box-only approximation.
+    eye_ratio = 0.24
+    mouth_ratio = 0.12
+    surprise = eye_ratio * 0.55 + mouth_ratio * 0.45
+    return min(1.0, max(0.0, surprise))
+
+
 def apply_face_blur(frame: np.ndarray, boxes: Sequence[FaceBox], kernel_size: int = 31) -> np.ndarray:
     """Apply a strong blur to boxes to anonymize faces."""
     out = frame.copy()
@@ -135,6 +190,36 @@ def apply_face_blur(frame: np.ndarray, boxes: Sequence[FaceBox], kernel_size: in
     return out
 
 
+def apply_expression_trigger(frame: np.ndarray, face_box: FaceBox) -> np.ndarray:
+    """Apply a prank-like exaggeration effect when the expression trigger fires.
+
+    This is intentionally a lightweight visual exaggeration, not a full face swap.
+    It widens the eye region and boosts contrast to make a surprise effect read clearly.
+    """
+    out = frame.copy()
+    x, y, w, h = face_box
+    if w <= 0 or h <= 0:
+        return out
+
+    # Create a subtle extra emphasis around the eyes.
+    eye_h = max(8, h // 6)
+    eye_w = max(12, w // 5)
+    eye_y = y + max(6, h // 4)
+    eye_x1 = x + max(5, w // 6)
+    eye_x2 = x + w - max(5, w // 6) - eye_w
+
+    for ex, ey in [(eye_x1, eye_y), (eye_x2, eye_y)]:
+        eye_roi = out[ey : ey + eye_h, ex : ex + eye_w]
+        if eye_roi.size == 0:
+            continue
+        enlarged = cv2.resize(eye_roi, (eye_w * 2, eye_h * 2), interpolation=cv2.INTER_LINEAR)
+        out[ey : ey + eye_h * 2, ex : ex + eye_w * 2] = enlarged[: eye_h * 2, : eye_w * 2]
+
+    # Slightly heighten contrast to emphasize the comedic reaction.
+    out = cv2.convertScaleAbs(out, alpha=1.15, beta=10)
+    return out
+
+
 def apply_qr_mask(frame: np.ndarray, boxes: Sequence[np.ndarray]) -> np.ndarray:
     """Black out detected QR boxes to hide payment information."""
     out = frame.copy()
@@ -145,7 +230,15 @@ def apply_qr_mask(frame: np.ndarray, boxes: Sequence[np.ndarray]) -> np.ndarray:
     return out
 
 
-def process_video(input_path: str, output_path: str, face_blur_kernel: int = 31, face_expand_ratio: float = 0.18, qr_mask: bool = True) -> None:
+def process_video(
+    input_path: str,
+    output_path: str,
+    face_blur_kernel: int = 31,
+    face_expand_ratio: float = 0.18,
+    qr_mask: bool = True,
+    expression_trigger: str = "none",
+    surprise_threshold: float = 0.62,
+) -> None:
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open input video: {input_path}")
@@ -178,6 +271,13 @@ def process_video(input_path: str, output_path: str, face_blur_kernel: int = 31,
             if qr_boxes:
                 frame = apply_qr_mask(frame, qr_boxes)
 
+        if expression_trigger and expression_trigger.lower() != "none":
+            for face_box in face_boxes:
+                score = detect_expression_score(frame, face_box)
+                if expression_trigger.lower() == "surprise" and score >= surprise_threshold:
+                    frame = apply_expression_trigger(frame, face_box)
+                    break
+
         writer.write(frame)
 
         if frame_index % 30 == 0:
@@ -196,6 +296,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--face-blur-kernel", type=int, default=31, help="Gaussian blur strength for faces")
     parser.add_argument("--face-expand-ratio", type=float, default=0.18, help="Expand face boxes before blur")
     parser.add_argument("--disable-qr-mask", action="store_true", help="Disable QR code masking")
+    parser.add_argument(
+        "--expression-trigger",
+        type=str,
+        default="none",
+        choices=["none", "surprise"],
+        help="Trigger a prank-like expression exaggeration effect when a surprise-like expression is detected",
+    )
+    parser.add_argument(
+        "--surprise-threshold",
+        type=float,
+        default=0.62,
+        help="Threshold for surprise expression detection. Raise it for stricter triggers.",
+    )
     return parser.parse_args()
 
 
@@ -213,6 +326,8 @@ def main() -> int:
             face_blur_kernel=args.face_blur_kernel,
             face_expand_ratio=args.face_expand_ratio,
             qr_mask=not args.disable_qr_mask,
+            expression_trigger=args.expression_trigger,
+            surprise_threshold=args.surprise_threshold,
         )
     except Exception as exc:  # pragma: no cover
         print(f"Error: {exc}", file=sys.stderr)
