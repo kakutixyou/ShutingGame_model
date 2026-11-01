@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 to-model-app/src/to_model/reasoning/persona_and_flow.py
-モデルの3大行動原則を保証する応答オーケードャー:
+モデルの3大行動原則を保証する応答オーケストレーター:
 1. リクエスト駆動の解析 (request_driven_only = True)
 2. どんな時も優しくフレンドリーなペルソナ (persona = "gentle_friendly")
 3. 希望を聞いてそれらを全部解決してから最後に提案 (resolve_all_before_proposing = True)
@@ -40,9 +40,12 @@ class FriendlyResolutionFirstEngine:
         "天気",
         "元気",
         "その後",
+        "最近",
+        "良い一日",
     )
     ACTION_KEYWORDS = (
         "解析",
+        "分析",
         "調べ",
         "チェック",
         "動か",
@@ -65,7 +68,12 @@ class FriendlyResolutionFirstEngine:
         "設計",
         "評価",
         "診断",
+        "調査",
+        "確認して",
+        "見て",
+        "開発",
     )
+    ACTION_SUFFIXES = ("して", "してください", "お願いします", "教えて", "見て", "調べて", "分析して")
 
     def _has_action_intent(self, text: str) -> bool:
         normalized = str(text or "").strip()
@@ -76,6 +84,8 @@ class FriendlyResolutionFirstEngine:
             return True
         if any(marker in normalized for marker in ("して", "してほしい", "お願いします", "お願い")):
             return True
+        if normalized.endswith(self.ACTION_SUFFIXES):
+            return True
         return False
 
     def _split_message_into_wishes(self, user_message: str) -> List[str]:
@@ -83,7 +93,6 @@ class FriendlyResolutionFirstEngine:
         if not msg:
             return []
 
-        # まず、句点・改行や感嘆符で分割
         candidate_parts = re.split(r"[。！？\n]+", msg)
         wishes: List[str] = []
         for part in candidate_parts:
@@ -95,58 +104,64 @@ class FriendlyResolutionFirstEngine:
             if self._has_action_intent(cleaned) or cleaned.endswith(("して", "ください", "お願いします", "教えて")):
                 wishes.append(cleaned)
 
-        # 例: 「マルウェアの挙動を分析して」 → 分割後の候補が欠けるケースへのフォールバック
         if not wishes:
             cleaned = re.sub(r"\s+", " ", msg).strip(" 　\t")
-            if self._has_action_intent(cleaned) or any(
-                keyword in cleaned for keyword in ("お願い", "してください", "教えて", "解析", "分析", "調べて")
-            ):
+            if self._has_action_intent(cleaned):
                 wishes.append(cleaned)
 
         return wishes
 
+    def _normalize_execution_result(self, result: Any) -> bool:
+        if isinstance(result, dict):
+            if "success" in result:
+                return bool(result.get("success"))
+            if "ok" in result:
+                return bool(result.get("ok"))
+            if "error" in result:
+                return not bool(result.get("error"))
+            if "resolved" in result:
+                return bool(result.get("resolved"))
+            return True
+        if isinstance(result, bool):
+            return result
+        if isinstance(result, (int, float)):
+            return result >= 0
+        if result is None:
+            return False
+        return True
+
     def _infer_resolution_status(self, wish: str, execution_results: Optional[List[Any]] = None, index: int = 0) -> bool:
         if isinstance(execution_results, list) and execution_results:
-            if index < len(execution_results):
-                result = execution_results[index]
-            else:
-                result = execution_results[-1]
+            candidate = execution_results[index] if index < len(execution_results) else execution_results[-1]
+            return self._normalize_execution_result(candidate)
 
-            if isinstance(result, dict):
-                if "success" in result:
-                    return bool(result.get("success"))
-                if "ok" in result:
-                    return bool(result.get("ok"))
-                if "error" in result:
-                    return not bool(result.get("error"))
-                return True
-            if isinstance(result, bool):
-                return result
-            return result is not None
-
-        # 実行結果が未渡しでも、要求が明確なら「解決可能」とみなす
         return self._has_action_intent(wish)
 
     def _contextual_proposal(self, user_message: str, wishes: List[str]) -> str:
         lower = str(user_message or "").lower()
-        if any(token in lower for token in ("マルウェア", "malware", "keylog", "キーロガー", "dos", "unicode", "utf-16", "pe ")):
+        if any(token in lower for token in ("マルウェア", "malware", "keylog", "キーロガー", "dos", "unicode", "utf-16", "pe ", "サンプル")):
             return (
-                "💡 次の一手: マルウェア解析は「サンプル確認 → 文字列抽出 → 擬似コード化 → 影響範囲評価」の流れで整理すると"
-                "再現性が上がります。対策ルールも一緒に作れるので、今の作業を可視化して次に進めます。"
+                "💡 次の一手: マルウェア解析は『サンプル確認 → 文字列抽出 → 影響範囲評価 → 対応策』の流れで整理すると、"
+                "再現性と説明のしやすさが上がります。必要ならこの流れをそのまま実行用のチェックリストに落とし込みます。"
             )
-        if any(token in lower for token in ("動画", "youtube", "字幕", "タイムコード", "video", "mp4", "ffmpeg")):
+        if any(token in lower for token in ("動画", "youtube", "字幕", "タイムコード", "video", "mp4", "ffmpeg", "subtitle")):
             return (
-                "💡 次の一手: 動画関連は「入力 → 解析 → タイムコード整形 → 出力」のデータフローを固定すると、"
-                "IPCやパス管理のミスが減ります。軽い JSON ベースの連携設計もおすすめです。"
+                "💡 次の一手: 動画関連は『入力 → 解析 → タイムコード整形 → 出力』のデータフローを固定すると、"
+                "JSON のやり取りやパス管理のミスが減ります。軽い IPC 設計も合わせて整えられます。"
             )
-        if any(token in lower for token in ("自己紹介", "あなたは", "どんなai", "何ができる")):
+        if any(token in lower for token in ("自己紹介", "あなたは", "どんなai", "何ができる", "なのか")):
             return (
-                "💡 次の一手: 自己紹介は『何ができるか』の具体例を 3 つに絞って伝えると、初対面でも会話がスムーズです。"
-                "そのうえで、今回の依頼に合わせて「できること」「やること」「次の提案」を切り分けると自然です。"
+                "💡 次の一手: 自己紹介は『自分ができること』『今の完成度』『会話の進め方』の3つに絞ると、"
+                "初対面でも一瞬で伝わります。自身の役割と次の一手を一緒に説明すると自然です。"
+            )
+        if any(token in lower for token in ("開発", "実装", "修正", "改善", "追加", "作成")):
+            return (
+                "💡 次の一手: 実装作業は『背景 → 目的 → 手順 → 検証』の順で整理すると、"
+                "手戻りを減らせます。次に、どこまで実装済みかを明示するとやりやすくなります。"
             )
         return (
-            "💡 次の一手: 依頼を「背景」「目的」「実行したいこと」に分けて整理すると、AI の判断と応答が安定します。"
-            "必要なら次に『会話の型』や『自動提案のルール』まで整えられます。"
+            "💡 次の一手: 依頼を『背景』『目的』『やりたいこと』『検証方法』に分けて整理すると、"
+            "AI の判断と応答が安定します。必要なら次に、会話の型や提案のテンプレートまで固められます。"
         )
 
     def process_user_wishes(
@@ -176,6 +191,9 @@ class FriendlyResolutionFirstEngine:
                 "マルウェア",
                 "動画",
                 "評価",
+                "実装",
+                "開発",
+                "分析",
             )
         )
 
@@ -183,13 +201,13 @@ class FriendlyResolutionFirstEngine:
         if not extracted_wishes and msg:
             extracted_wishes = [msg]
 
-        resolved_items = []
+        resolved_items: List[WishResolutionItem] = []
         for i, wish in enumerate(extracted_wishes, start=1):
             resolved = self._infer_resolution_status(wish, execution_results, i - 1)
             summary = (
                 f"『{wish}』の対応を完了しました。"
                 if resolved
-                else f"『{wish}』は未実行または不明瞭なため、具体的なアクションを確認する必要があります。"
+                else f"『{wish}』は未実行または曖昧なため、具体的なアクションを確認する必要があります。"
             )
             resolved_items.append(WishResolutionItem(f"wish_{i:02d}", wish, resolved, summary))
 
