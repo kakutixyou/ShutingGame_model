@@ -7,6 +7,7 @@ def test_greeting_is_not_treated_as_task():
     engine = FriendlyResolutionFirstEngine()
     result = engine.process_user_wishes("今日はいい天気ですね。")
     assert result["message_type"] == "greeting"
+    assert result["execution_state"] == "idle"
     assert result["resolved_items"] == []
 
 
@@ -25,6 +26,15 @@ def test_execution_error_marks_resolution_false():
         execution_results=[{"error": "failed"}],
     )
     assert result["resolved_items"][0]["resolved"] is False
+    assert result["execution_state"] == "needs_clarification"
+
+
+def test_self_intro_returns_intro_and_state():
+    engine = FriendlyResolutionFirstEngine()
+    result = engine.process_user_wishes("自己紹介して")
+    assert result["message_type"] == "self_intro"
+    assert result["execution_state"] == "introducing"
+    assert "自作AI" in result["friendly_response_text"]
 
 
 def test_malware_context_proposal_is_contextual():
@@ -34,3 +44,6 @@ def test_malware_context_proposal_is_contextual():
         execution_results=[{"success": True}],
     )
     assert "サンプル確認" in result["follow_up_proposal"]
+    assert result["task_history"][0]["status"] == "resolved"
+
+
