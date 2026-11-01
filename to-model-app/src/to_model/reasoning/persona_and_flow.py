@@ -42,11 +42,14 @@ class FriendlyResolutionFirstEngine:
         "その後",
         "最近",
         "良い一日",
+        "よかった",
+        "良いですね",
     )
     ACTION_KEYWORDS = (
         "解析",
         "分析",
         "調べ",
+        "調査",
         "チェック",
         "動か",
         "実行",
@@ -68,12 +71,25 @@ class FriendlyResolutionFirstEngine:
         "設計",
         "評価",
         "診断",
-        "調査",
-        "確認して",
         "見て",
         "開発",
+        "作って",
+        "作成して",
+        "レビュー",
+        "まとめ",
     )
-    ACTION_SUFFIXES = ("して", "してください", "お願いします", "教えて", "見て", "調べて", "分析して")
+    ACTION_SUFFIXES = (
+        "して",
+        "してください",
+        "お願いします",
+        "教えて",
+        "見て",
+        "調べて",
+        "分析して",
+        "確認して",
+        "作って",
+        "作成して",
+    )
 
     def _has_action_intent(self, text: str) -> bool:
         normalized = str(text or "").strip()
@@ -93,48 +109,83 @@ class FriendlyResolutionFirstEngine:
         if not msg:
             return []
 
-        candidate_parts = re.split(r"[。！？\n]+", msg)
-        wishes: List[str] = []
-        for part in candidate_parts:
-            cleaned = re.sub(r"\s+", " ", part).strip(" 　\t")
-            if not cleaned:
-                continue
-            if any(p in cleaned for p in self.GREETING_PATTERNS) and not self._has_action_intent(cleaned):
-                continue
-            if self._has_action_intent(cleaned) or cleaned.endswith(("して", "ください", "お願いします", "教えて")):
-                wishes.append(cleaned)
+        # 句点・改行・区切り文字で分割したあと、動作要求のある文だけ残す
+        split_markers = ["。", "!", "？", "\n", "、"]
+        parts: List[str] = []
+        current = msg
+        for marker in split_markers:
+            current = current.replace(marker, "\n")
+        for chunk in current.split("\n"):
+            cleaned = re.sub(r"\s+", " ", chunk).strip(" 　\t")
+            if cleaned:
+                parts.append(cleaned)
 
+        wishes: List[str] = []
+        for part in parts:
+            if any(p in part for p in self.GREETING_PATTERNS) and not self._has_action_intent(part):
+                continue
+            if self._has_action_intent(part):
+                wishes.append(part)
+
+        # 句読点がない長文でも、明示的な依頼文は拾う
         if not wishes:
             cleaned = re.sub(r"\s+", " ", msg).strip(" 　\t")
             if self._has_action_intent(cleaned):
                 wishes.append(cleaned)
 
+        # 「〜して、あと〜して」のような複数依頼も分割対象にする
+        flattened: List[str] = []
+        for wish in wishes:
+            sub_parts = re.split(r"(?:\s+(?:あと|それから|そして)\s+|\s*、\s*)", wish)
+            for candidate in sub_parts:
+                normalized = re.sub(r"\s+", " ", candidate).strip(" 　\t")
+                if normalized and self._has_action_intent(normalized):
+                    flattened.append(normalized)
+        if flattened:
+            wishes = flattened
+
         return wishes
 
     def _normalize_execution_result(self, result: Any) -> bool:
         if isinstance(result, dict):
-            if "success" in result:
-                return bool(result.get("success"))
-            if "ok" in result:
-                return bool(result.get("ok"))
-            if "error" in result:
-                return not bool(result.get("error"))
-            if "resolved" in result:
-                return bool(result.get("resolved"))
+            lower = {str(k).lower(): v for k, v in result.items()}
+            if "success" in lower:
+                return bool(lower["success"])
+            if "ok" in lower:
+                return bool(lower["ok"])
+            if "error" in lower:
+                return not bool(lower["error"])
+            if "resolved" in lower:
+                return bool(lower["resolved"])
+            if "status" in lower:
+                status = str(lower["status"]).lower()
+                if status in {"success", "ok", "resolved", "completed", "done"}:
+                    return True
+                if status in {"error", "failed", "exception"}:
+                    return False
             return True
+
         if isinstance(result, bool):
             return result
         if isinstance(result, (int, float)):
             return result >= 0
         if result is None:
             return False
+        if isinstance(result, str):
+            normalized = result.strip().lower()
+            if any(token in normalized for token in ("error", "failed", "exception", "失敗", "エラー")):
+                return False
+            if any(token in normalized for token in ("success", "ok", "completed", "done", "成功", "完了")):
+                return True
+            return False
+        if isinstance(result, list):
+            return bool(result) and all(self._normalize_execution_result(item) for item in result)
         return True
 
     def _infer_resolution_status(self, wish: str, execution_results: Optional[List[Any]] = None, index: int = 0) -> bool:
         if isinstance(execution_results, list) and execution_results:
             candidate = execution_results[index] if index < len(execution_results) else execution_results[-1]
             return self._normalize_execution_result(candidate)
-
         return self._has_action_intent(wish)
 
     def _contextual_proposal(self, user_message: str, wishes: List[str]) -> str:
@@ -142,7 +193,7 @@ class FriendlyResolutionFirstEngine:
         if any(token in lower for token in ("マルウェア", "malware", "keylog", "キーロガー", "dos", "unicode", "utf-16", "pe ", "サンプル")):
             return (
                 "💡 次の一手: マルウェア解析は『サンプル確認 → 文字列抽出 → 影響範囲評価 → 対応策』の流れで整理すると、"
-                "再現性と説明のしやすさが上がります。必要ならこの流れをそのまま実行用のチェックリストに落とし込みます。"
+                "再現性と説明のしやすさが上がります。必要ならこの流れをそのまま実行用チェックリストに落とし込みます。"
             )
         if any(token in lower for token in ("動画", "youtube", "字幕", "タイムコード", "video", "mp4", "ffmpeg", "subtitle")):
             return (
@@ -194,6 +245,7 @@ class FriendlyResolutionFirstEngine:
                 "実装",
                 "開発",
                 "分析",
+                "会話",
             )
         )
 
