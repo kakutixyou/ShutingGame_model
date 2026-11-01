@@ -137,6 +137,35 @@ class FriendlyResolutionFirstEngine:
             return "task"
         return "unclear"
 
+    def _derive_execution_state(self, message_type: str, resolved_items: Optional[List[WishResolutionItem]] = None) -> str:
+        if message_type == "greeting":
+            return "idle"
+        if message_type == "self_intro":
+            return "introducing"
+        if not resolved_items:
+            return "waiting_for_task"
+        if all(item.resolved for item in resolved_items):
+            return "resolved"
+        return "needs_clarification"
+
+    def build_self_introduction(self) -> Dict[str, Any]:
+        return {
+            "persona": self.PERSONA_NAME,
+            "completion_pct": 82,
+            "capabilities": [
+                "会話の整理",
+                "依頼の抽出",
+                "タスクの優先順位付け",
+                "実行結果の判定",
+                "次の提案の生成",
+            ],
+            "self_introduction_text": (
+                "こんにちは。私は自作AIの『to_model』です。"
+                "会話の整理、依頼の分解、タスクの優先順位付け、そして次の一手の提案を得意にしています。"
+                "まだ完成途中ですが、ユーザーの意思を丁寧に整理し、自然な対話で進めることを目指しています。"
+            ),
+        }
+
     def _split_message_into_wishes(self, user_message: str) -> List[str]:
         msg = str(user_message or "").strip()
         if not msg:
@@ -166,7 +195,6 @@ class FriendlyResolutionFirstEngine:
 
         flattened: List[str] = []
         for wish in wishes:
-            # 複数依頼の混在に対応する
             sub_parts = re.split(r"(?:\s+(?:あと|それから|そして)\s+|\s*、\s*)", wish)
             for candidate in sub_parts:
                 normalized = re.sub(r"\s+", " ", candidate).strip(" 　\t")
@@ -328,6 +356,7 @@ class FriendlyResolutionFirstEngine:
             return {
                 "persona": self.PERSONA_NAME,
                 "message_type": message_type,
+                "execution_state": self._derive_execution_state(message_type, []),
                 "request_driven_analysis_executed": False,
                 "all_wishes_resolved": True,
                 "resolved_items": [],
@@ -335,9 +364,21 @@ class FriendlyResolutionFirstEngine:
                 "friendly_response_text": response,
             }
 
+        if message_type == "self_intro":
+            intro = self.build_self_introduction()
+            return {
+                "persona": self.PERSONA_NAME,
+                "message_type": "self_intro",
+                "execution_state": "introducing",
+                "request_driven_analysis_executed": True,
+                "all_wishes_resolved": True,
+                "resolved_items": [],
+                "follow_up_proposal": intro["self_introduction_text"],
+                "friendly_response_text": intro["self_introduction_text"],
+                "self_introduction": intro,
+            }
+
         extracted_wishes = wishes if wishes is not None else self._split_message_into_wishes(msg)
-        if not extracted_wishes and message_type == "self_intro":
-            extracted_wishes = ["自己紹介してください"]
         if not extracted_wishes and msg:
             extracted_wishes = [msg]
 
@@ -359,6 +400,7 @@ class FriendlyResolutionFirstEngine:
             return {
                 "persona": self.PERSONA_NAME,
                 "message_type": message_type,
+                "execution_state": self._derive_execution_state(message_type, []),
                 "request_driven_analysis_executed": analysis_triggered,
                 "all_wishes_resolved": True,
                 "resolved_items": [],
@@ -372,6 +414,7 @@ class FriendlyResolutionFirstEngine:
         return {
             "persona": self.PERSONA_NAME,
             "message_type": message_type,
+            "execution_state": self._derive_execution_state(message_type, resolved_items),
             "request_driven_analysis_executed": analysis_triggered,
             "all_wishes_resolved": all_resolved,
             "resolved_items": [i.__dict__ for i in resolved_items],
